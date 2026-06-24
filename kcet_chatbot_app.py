@@ -114,12 +114,11 @@ st.markdown("""
 # ──────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    api_key = st.text_input(
-        "Enter your Groq API Key",
-        type="password",
-        help="Get your free key from console.groq.com"
-    )
-    st.markdown("**Get a free key:** [console.groq.com](https://console.groq.com)")
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        api_key = None
+        st.warning("⚠️ API key not configured.")
     st.markdown("---")
     st.markdown("**Quick Topics:**")
     suggestions = [
@@ -187,7 +186,7 @@ if user_input:
                 ]
 
                 response = client.chat.completions.create(
-                    model="llama3-8b-8192",
+                    model="llama-3.3-70b-versatile",
                     messages=api_messages,
                     max_tokens=512,
                 )
