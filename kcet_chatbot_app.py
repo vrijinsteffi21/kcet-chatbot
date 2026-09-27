@@ -1,4 +1,5 @@
 import streamlit as st
+import base64
 from groq import Groq
 
 # ──────────────────────────────────────────────
@@ -99,6 +100,11 @@ ABOUT THE BOT:
 - Phase 1 used Python keyword matching; Phase 2 uses Groq AI API with a Streamlit UI
 """.strip()
 
+# Vision-capable Groq model. Check Groq's model list before deploying —
+# vision model names/availability change over time.
+VISION_MODEL = "qwen/qwen3.8-27b"
+TEXT_MODEL = "llama-3.3-70b-versatile"
+
 # ──────────────────────────────────────────────
 #  HEADER
 # ──────────────────────────────────────────────
@@ -119,6 +125,27 @@ with st.sidebar:
     except Exception:
         api_key = None
         st.warning("⚠️ API key not configured.")
+
+    st.markdown("---")
+    st.markdown("**📸 Attach an Image**")
+    img_tab1, img_tab2 = st.tabs(["Upload", "Camera"])
+    with img_tab1:
+        uploaded_file = st.file_uploader(
+            "Upload an image", type=["jpg", "jpeg", "png"], key="uploader"
+        )
+    with img_tab2:
+        camera_file = st.camera_input("Take a photo", key="camera")
+
+    # Prefer a freshly taken photo over a stale upload if both exist
+    active_image = camera_file or uploaded_file
+    if active_image:
+        st.image(active_image, caption="Attached image", use_container_width=True)
+        if st.button("❌ Remove image", use_container_width=True):
+            active_image = None
+            st.session_state.pop("uploader", None)
+            st.session_state.pop("camera", None)
+            st.rerun()
+
     st.markdown("---")
     st.markdown("**Quick Topics:**")
     suggestions = [
@@ -149,10 +176,23 @@ if "pending_input" not in st.session_state:
     st.session_state.pending_input = None
 
 # ──────────────────────────────────────────────
+#  HELPERS
+# ──────────────────────────────────────────────
+def encode_image(file) -> str:
+    return base64.b64encode(file.getvalue()).decode("utf-8")
+
+
+def image_mime(file) -> str:
+    # st.file_uploader / st.camera_input give .type; default to jpeg if missing
+    return getattr(file, "type", None) or "image/jpeg"
+
+# ──────────────────────────────────────────────
 #  DISPLAY CHAT HISTORY
 # ──────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"], avatar="🧑‍🎓" if msg["role"] == "user" else "🎓"):
+        if msg.get("image_preview"):
+            st.image(msg["image_preview"], width=220)
         st.markdown(msg["content"])
 
 # ──────────────────────────────────────────────
@@ -169,9 +209,17 @@ if user_input:
         st.warning("⚠️ Please enter your Groq API key in the sidebar to use the AI chatbot.")
         st.stop()
 
+    image_for_this_turn = active_image  # snapshot at time of send
+
     # Show user message
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.messages.append({
+        "role": "user",
+        "content": user_input,
+        "image_preview": image_for_this_turn if image_for_this_turn else None,
+    })
     with st.chat_message("user", avatar="🧑‍🎓"):
+        if image_for_this_turn:
+            st.image(image_for_this_turn, width=220)
         st.markdown(user_input)
 
     # Call Groq API
@@ -180,16 +228,47 @@ if user_input:
             try:
                 client = Groq(api_key=api_key)
 
-                api_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
-                    {"role": m["role"], "content": m["content"]}
-                    for m in st.session_state.messages
-                ]
+                if image_for_this_turn:
+                    # Vision call: image + text go in a single user message.
+                    # (Vision models on Groq currently support one user turn
+                    # with image content, not a full running history.)
+                    b64 = encode_image(image_for_this_turn)
+                    mime = image_mime(image_for_this_turn)
 
-                response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=api_messages,
-                    max_tokens=512,
-                )
+                    vision_messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": f"{SYSTEM_PROMPT}\n\nUser question about the attached image: {user_input}"
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime};base64,{b64}"}
+                                }
+                            ]
+                        }
+                    ]
+
+                    response = client.chat.completions.create(
+                        model=VISION_MODEL,
+                        messages=vision_messages,
+                        max_tokens=512,
+                    )
+                else:
+                    # Normal text-only call with full chat history
+                    api_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state.messages
+                        if not m.get("image_preview")  # skip image turns' raw content here
+                    ]
+
+                    response = client.chat.completions.create(
+                        model=TEXT_MODEL,
+                        messages=api_messages,
+                        max_tokens=512,
+                    )
 
                 reply = response.choices[0].message.content
                 st.markdown(reply)
@@ -201,11 +280,18 @@ if user_input:
                     st.error("❌ Invalid API key. Please check and try again.")
                 elif "rate" in err.lower():
                     st.error("⏳ Rate limit reached. Please wait a moment and try again.")
+                elif "model" in err.lower() and "decommission" in err.lower():
+                    st.error("❌ The vision model may have been renamed/retired by Groq. Check the current model list.")
                 else:
                     st.error(f"❌ Something went wrong: {err}")
+
+    # Clear the used image so it doesn't attach to the next question by accident
+    if image_for_this_turn:
+        st.session_state.pop("uploader", None)
+        st.session_state.pop("camera", None)
 
 # ──────────────────────────────────────────────
 #  WELCOME MESSAGE
 # ──────────────────────────────────────────────
 if not st.session_state.messages:
-    st.info("👋 Hi! I'm the KCET AI Chatbot. Ask me anything about Kamaraj College — departments, placements, facilities, events, and more!")
+    st.info("👋 Hi! I'm the KCET AI Chatbot. Ask me anything about Kamaraj College — departments, placements, facilities, events, and more! You can also attach a photo (e.g. a form, notice, or timetable) from the sidebar and ask about it.")
