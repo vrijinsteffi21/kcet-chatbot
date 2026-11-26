@@ -113,7 +113,7 @@ ABOUT THE BOT:
 # Vision-capable Groq model. Check console.groq.com/docs/vision before deploying —
 # vision model names/availability change over time.
 VISION_MODEL = "qwen/qwen3.8-27b"
-TEXT_MODEL = "llama-3.3-70b-versatile"
+TEXT_MODEL = "openai/gpt-oss-120b"
 
 # ──────────────────────────────────────────────
 #  NOTES PORTAL — SETTINGS & HELPERS
@@ -434,11 +434,13 @@ with st.sidebar:
         for s in suggestions:
             if st.button(s, use_container_width=True):
                 st.session_state.pending_input = s
+                st.rerun()
 
         st.markdown("---")
         st.caption("Phase 2 · Groq AI Powered · Streamlit UI")
         if st.button("🗑️ Clear Chat", use_container_width=True):
             st.session_state.messages = []
+            st.session_state.pending_input = None
             st.rerun()
 
 # ──────────────────────────────────────────────
@@ -507,12 +509,13 @@ if user_input:
                     mime = image_mime(image_for_this_turn)
 
                     vision_messages = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
                         {
                             "role": "user",
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": f"{SYSTEM_PROMPT}\n\nUser question about the attached image: {user_input}"
+                                    "text": "Please answer this question about the attached image: " + user_input
                                 },
                                 {
                                     "type": "image_url",
@@ -525,7 +528,7 @@ if user_input:
                     response = client.chat.completions.create(
                         model=VISION_MODEL,
                         messages=vision_messages,
-                        max_tokens=512,
+                        max_completion_tokens=1024,
                     )
                 else:
                     # Normal text-only call with chat history
@@ -538,28 +541,31 @@ if user_input:
                     response = client.chat.completions.create(
                         model=TEXT_MODEL,
                         messages=api_messages,
-                        max_tokens=512,
+                        max_completion_tokens=1024,
                     )
 
                 reply = response.choices[0].message.content
+                if not reply:
+                    reply = "Sorry, I couldn't generate a response. Please try again."
                 st.markdown(reply)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
 
             except Exception as e:
-                err = str(e)
-                if "auth" in err.lower() or "api key" in err.lower() or "401" in err:
-                    st.error("❌ Invalid API key. Please check and try again.")
-                elif "rate" in err.lower():
-                    st.error("⏳ Rate limit reached. Please wait a moment and try again.")
-                elif "model" in err.lower() and ("decommission" in err.lower() or "not_found" in err.lower()):
-                    st.error("❌ The model may have been renamed/retired by Groq. Check the current model list.")
+                err = str(e).lower()
+                if "401" in err or "authentication" in err or "api key" in err:
+                    st.error("❌ Invalid API key. Please check your Groq API key in Streamlit Secrets.")
+                elif "429" in err or "rate limit" in err:
+                    st.error("⏳ Rate limit reached. Please wait and try again.")
+                elif "model" in err or "404" in err:
+                    st.error("❌ Model error. Please check the Groq model availability and access.")
                 else:
-                    st.error(f"❌ Something went wrong: {err}")
+                    st.error(f"❌ Something went wrong: {e}")
 
     # Clear the used image so it doesn't attach to the next question by accident
     if image_for_this_turn:
         st.session_state.pop("uploader", None)
         st.session_state.pop("camera", None)
+        st.rerun()
 
 # ──────────────────────────────────────────────
 #  WELCOME MESSAGE
